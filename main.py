@@ -1,277 +1,301 @@
 import sys
-import os
 import base64
 import io
 import numpy as np
 import librosa
 from PIL import Image
-import matplotlib.cm as cm
 
-def process_audio_to_base64(audio_path):
-    """
-    读取 WAV，计算 Mel 频谱，归一化并转为 Base64 图片字符串。
-    """
-    if not os.path.exists(audio_path):
-        print(f"Error: File '{audio_path}' not found.")
+def process_audio_to_html(audio_path, output_html="mel_skeleton.html"):
+    print(f"Loading audio: {audio_path}...")
+    
+    # 1. 音频处理与 Mel 谱图计算
+    try:
+        y, sr = librosa.load(audio_path, sr=None)
+    except Exception as e:
+        print(f"Error loading audio: {e}")
         sys.exit(1)
 
-    print(f"Processing audio: {audio_path}...")
+    # 计算 Mel Spectrogram
+    n_fft = 2048
+    hop_length = 512
+    n_mels = 128
+    S = librosa.feature.melspectrogram(y=y, sr=sr, n_fft=n_fft, hop_length=hop_length, n_mels=n_mels)
     
-    # 1. 加载音频
-    y, sr = librosa.load(audio_path)
-    
-    # 2. 计算 Mel Spectrogram
-    # n_mels 决定了纵向的分辨率
-    S = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=128, fmax=8000)
-    
-    # 3. 转为对数刻度 (dB)
+    # 转为对数刻度 (dB)
     S_dB = librosa.power_to_db(S, ref=np.max)
-    
-    # 4. 归一化到 0-255 并转为 uint8 (为了生成图片)
-    # 翻转 Y 轴，因为 librosa 默认低频在下，但在数组中是 index 0
-    S_dB = np.flipud(S_dB) 
-    
-    min_val = S_dB.min()
-    max_val = S_dB.max()
-    norm_S = 255 * (S_dB - min_val) / (max_val - min_val)
-    norm_S = norm_S.astype(np.uint8)
-    
-    # 5. 应用颜色映射 (Colormap) - 使用 'magma' 或 'inferno' 效果较好
-    # Matplotlib 的 colormap 返回 0-1 的 float，我们需要转回 0-255
-    cmap = cm.get_cmap('magma')
-    im_colored = cmap(norm_S / 255.0) 
-    im_uint8 = (im_colored * 255).astype(np.uint8)
-    
-    # 6. 转为 PIL Image 并保存到内存 Buffer
-    img = Image.fromarray(im_uint8)
-    
-    # 这里不需要坐标轴，直接是纯像素
-    buffered = io.BytesIO()
-    img.save(buffered, format="PNG")
-    img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
-    
-    return img_str
 
-def generate_html(base64_img, output_filename):
+    # 2. 图像预处理 (归一化到 0-255)
+    # 翻转 Y 轴，因为 spectrogram 默认低频在下，但在图像矩阵中索引 0 在上
+    S_dB = np.flipud(S_dB)
+    
+    img_min = S_dB.min()
+    img_max = S_dB.max()
+    norm_S = (S_dB - img_min) / (img_max - img_min) * 255.0
+    img_data = norm_S.astype(np.uint8)
+
+    # 3. 将图像转换为 Base64 字符串
+    img = Image.fromarray(img_data, mode='L') # L mode is grayscale
+    # 调整一下大小，避免太长导致浏览器处理太慢，限制最大宽度
+    max_width = 1200
+    if img.width > max_width:
+        new_height = int(img.height * (max_width / img.width))
+        img = img.resize((max_width, new_height), Image.Resampling.BILINEAR)
+
+    buffer = io.BytesIO()
+    img.save(buffer, format="PNG")
+    img_base64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
+
+    # 4. 生成 HTML
+    # 这里包含了完整的 CSS 和 JS (Zhang-Suen 算法实现)
     html_content = f"""
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Interactive Mel Spectrum Ridge Detection</title>
+    <title>Mel Spectrum Skeletonization</title>
     <style>
-        body {{
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background-color: #1e1e1e;
-            color: #e0e0e0;
-            margin: 0;
-            padding: 20px;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
+        body {{ font-family: sans-serif; background: #1e1e1e; color: #ddd; margin: 0; padding: 20px; }}
+        h2 {{ margin-bottom: 10px; border-bottom: 1px solid #444; padding-bottom: 10px; }}
+        .controls {{ 
+            background: #2d2d2d; padding: 15px; border-radius: 8px; margin-bottom: 20px; 
+            display: flex; gap: 30px; align-items: center; flex-wrap: wrap;
         }}
-        h2 {{ margin-bottom: 10px; color: #fff; }}
-        .controls {{
-            background: #2d2d2d;
-            padding: 15px;
-            border-radius: 8px;
-            margin-bottom: 20px;
-            display: flex;
-            gap: 20px;
-            box-shadow: 0 4px 6px rgba(0,0,0,0.3);
-        }}
-        .control-group {{
-            display: flex;
-            flex-direction: column;
-            align-items: flex-start;
-        }}
-        label {{ font-size: 0.9em; margin-bottom: 5px; color: #aaa; }}
+        .control-group {{ display: flex; flex-direction: column; gap: 5px; }}
+        label {{ font-size: 0.9em; color: #aaa; }}
         input[type=range] {{ width: 200px; cursor: pointer; }}
+        span.val {{ color: #00bcd4; font-weight: bold; width: 40px; display: inline-block; text-align: right; }}
         
-        .container {{
-            display: flex;
-            gap: 20px;
-            flex-wrap: wrap;
-            justify-content: center;
-        }}
-        .panel {{
-            background: #000;
-            padding: 10px;
-            border-radius: 4px;
-            border: 1px solid #444;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-        }}
-        .panel h3 {{ margin: 0 0 10px 0; font-size: 1em; color: #888; }}
-        canvas {{
-            max-width: 100%;
-            height: auto;
-            image-rendering: pixelated; /* 保持像素清晰，适合频谱图 */
-        }}
+        .container {{ display: flex; flex-direction: column; gap: 20px; }}
+        .canvas-wrapper {{ position: relative; width: 100%; overflow-x: auto; }}
+        canvas {{ display: block; background: #000; border: 1px solid #444; }}
+        
+        .row {{ display: flex; gap: 20px; }}
+        .panel {{ flex: 1; }}
+        .panel h3 {{ font-size: 1rem; color: #888; margin: 5px 0; }}
+        
+        /* 隐藏原始图片，仅用于加载数据 */
+        #sourceImg {{ display: none; }}
+        
+        .status {{ color: #ff9800; font-size: 0.8em; margin-left: 10px; }}
     </style>
 </head>
 <body>
 
-    <h2>Mel Spectrum Ridge Detector</h2>
+    <h2>Mel Spectrum Ridge Extraction (Skeletonization)</h2>
 
     <div class="controls">
         <div class="control-group">
-            <label for="threshold">亮度阈值 (Noise Gate): <span id="val-thresh">30</span></label>
-            <input type="range" id="threshold" min="0" max="255" value="30">
+            <label>Binary Threshold <span id="threshVal" class="val">100</span></label>
+            <input type="range" id="threshSlider" min="0" max="255" value="80">
         </div>
         <div class="control-group">
-            <label for="ridgeObj">脊线灵敏度 (Vertical Contrast): <span id="val-ridge">15</span></label>
-            <input type="range" id="ridgeObj" min="0" max="100" value="15">
+            <label>Horizontal Bias (Pre-connect) <span id="biasVal" class="val">1</span></label>
+            <input type="range" id="biasSlider" min="0" max="10" value="2">
         </div>
         <div class="control-group">
-            <label for="gain">显示增益 (Output Gain): <span id="val-gain">2.0</span></label>
-            <input type="range" id="gain" min="0.5" max="5.0" step="0.1" value="2.0">
+            <button onclick="runProcessing()" style="padding: 8px 16px; cursor: pointer; background: #00bcd4; border: none; border-radius: 4px; color: white; font-weight: bold;">Update / Run</button>
+            <span id="status" class="status">Ready</span>
         </div>
     </div>
 
-    <div class="container">
+    <div class="row">
         <div class="panel">
-            <h3>Original Mel Spectrum</h3>
-            <canvas id="canvasSource"></canvas>
+            <h3>Original Mel Spectrogram</h3>
+            <canvas id="canvasOrg"></canvas>
         </div>
         <div class="panel">
-            <h3>Extracted Horizontal Ridges</h3>
-            <canvas id="canvasDest"></canvas>
+            <h3>Extracted Ridges (Thinning Algorithm)</h3>
+            <canvas id="canvasRes"></canvas>
         </div>
     </div>
 
-    <img id="sourceImg" src="data:image/png;base64,{base64_img}" style="display:none;" />
+    <img id="sourceImg" src="data:image/png;base64,{img_base64}" onload="init()" />
 
-    <script>
-        window.onload = function() {{
-            const img = document.getElementById('sourceImg');
-            const cSrc = document.getElementById('canvasSource');
-            const ctxSrc = cSrc.getContext('2d');
-            const cDest = document.getElementById('canvasDest');
-            const ctxDest = cDest.getContext('2d');
+<script>
+    const img = document.getElementById('sourceImg');
+    const cOrg = document.getElementById('canvasOrg');
+    const ctxOrg = cOrg.getContext('2d');
+    const cRes = document.getElementById('canvasRes');
+    const ctxRes = cRes.getContext('2d');
+    
+    const sliderThresh = document.getElementById('threshSlider');
+    const sliderBias = document.getElementById('biasSlider');
+    const statusSpan = document.getElementById('status');
 
-            // Controls
-            const sThreshold = document.getElementById('threshold');
-            const sRidge = document.getElementById('ridgeObj');
-            const sGain = document.getElementById('gain');
+    // 更新显示的数值
+    sliderThresh.oninput = () => document.getElementById('threshVal').innerText = sliderThresh.value;
+    sliderBias.oninput = () => document.getElementById('biasVal').innerText = sliderBias.value;
+    
+    // 监听变化自动运行 (Debounce 防止卡顿)
+    let timeout;
+    [sliderThresh, sliderBias].forEach(el => {{
+        el.addEventListener('change', () => {{
+            statusSpan.innerText = "Processing...";
+            setTimeout(runProcessing, 10);
+        }});
+    }});
 
-            // Display value updaters
-            const updateLabels = () => {{
-                document.getElementById('val-thresh').innerText = sThreshold.value;
-                document.getElementById('val-ridge').innerText = sRidge.value;
-                document.getElementById('val-gain').innerText = sGain.value;
-            }};
+    function init() {{
+        // 设置 Canvas 大小
+        cOrg.width = img.width;
+        cOrg.height = img.height;
+        cRes.width = img.width;
+        cRes.height = img.height;
 
-            // Main Processing Function
-            function process() {{
-                const w = img.width;
-                const h = img.height;
+        // 绘制原始图
+        ctxOrg.drawImage(img, 0, 0);
+        
+        // 首次运行
+        runProcessing();
+    }}
 
-                // Sync canvas sizes
-                if (cSrc.width !== w) {{ cSrc.width = w; cSrc.height = h; }}
-                if (cDest.width !== w) {{ cDest.width = w; cDest.height = h; }}
+    function runProcessing() {{
+        const width = cOrg.width;
+        const height = cOrg.height;
+        
+        // 1. 获取原始像素
+        const frame = ctxOrg.getImageData(0, 0, width, height);
+        const data = frame.data; // RGBA array
+        
+        const threshold = parseInt(sliderThresh.value);
+        const hBias = parseInt(sliderBias.value);
 
-                // Draw source
-                ctxSrc.drawImage(img, 0, 0);
-                
-                // Get pixel data
-                const srcData = ctxSrc.getImageData(0, 0, w, h);
-                const dstData = ctxDest.createImageData(w, h);
-                
-                const sBuf = srcData.data;
-                const dBuf = dstData.data;
+        // 创建二值化矩阵 (0 or 1)
+        // 我们使用一个平坦的数组来模拟二维矩阵，binaryMap[y * width + x]
+        let binaryMap = new Uint8Array(width * height);
 
-                const thresh = parseInt(sThreshold.value);
-                const ridgeSens = parseInt(sRidge.value);
-                const gain = parseFloat(sGain.value);
+        for (let i = 0; i < data.length; i += 4) {{
+            // 灰度值 (我们是灰度图，R=G=B)
+            let val = data[i]; 
+            binaryMap[i/4] = (val > threshold) ? 1 : 0;
+        }}
 
-                // CV Logic: Horizontal Ridge Detection
-                // 我们遍历每个像素，检查它在垂直方向上是否是局部最大值（脊）
-                // 并且亮度是否超过阈值
-                
-                for (let y = 1; y < h - 1; y++) {{
-                    for (let x = 0; x < w; x++) {{
-                        const idx = (y * w + x) * 4;
-                        
-                        // 获取当前像素及上下像素的亮度 (简单取 R 通道，因为是灰度或伪彩色)
-                        // 为了准确性，我们计算简单的平均亮度 (R+G+B)/3
-                        const val = (sBuf[idx] + sBuf[idx+1] + sBuf[idx+2]) / 3;
-                        
-                        // 上方像素
-                        const idxUp = ((y - 1) * w + x) * 4;
-                        const valUp = (sBuf[idxUp] + sBuf[idxUp+1] + sBuf[idxUp+2]) / 3;
-                        
-                        // 下方像素
-                        const idxDown = ((y + 1) * w + x) * 4;
-                        const valDown = (sBuf[idxDown] + sBuf[idxDown+1] + sBuf[idxDown+2]) / 3;
-
-                        // 核心算法：
-                        // 1. 自身亮度必须大于阈值 (Noise Gate)
-                        // 2. 自身亮度必须显著高于上方像素 (Ridge Top)
-                        // 3. 自身亮度必须显著高于下方像素 (Ridge Bottom)
-                        // 这构成了一个垂直方向的"山峰"，即横向延伸的脊线
-                        
-                        let isRidge = false;
-                        if (val > thresh) {{
-                            if ((val > valUp + ridgeSens) && (val > valDown + ridgeSens)) {{
-                                isRidge = true;
+        // 2. 预处理：横向增强 (Horizontal Morphological Dilation/Closing)
+        // 为了连接那些因为能量波动断开的横向线条
+        if (hBias > 0) {{
+            let enhancedMap = new Uint8Array(width * height);
+            for (let y = 0; y < height; y++) {{
+                for (let x = 0; x < width; x++) {{
+                    if (binaryMap[y * width + x] === 1) {{
+                        // 如果当前点是白点，向左右扩散 hBias 个像素
+                        for (let k = -hBias; k <= hBias; k++) {{
+                            let nx = x + k;
+                            if (nx >= 0 && nx < width) {{
+                                enhancedMap[y * width + nx] = 1;
                             }}
-                        }}
-
-                        if (isRidge) {{
-                            // 设为白色 (或者根据原始强度 * gain)
-                            let outVal = val * gain;
-                            if (outVal > 255) outVal = 255;
-                            
-                            dBuf[idx] = outVal;     // R
-                            dBuf[idx+1] = outVal;   // G
-                            dBuf[idx+2] = outVal;   // B
-                            dBuf[idx+3] = 255;      // Alpha
-                        }} else {{
-                            // 背景全黑
-                            dBuf[idx] = 0;
-                            dBuf[idx+1] = 0;
-                            dBuf[idx+2] = 0;
-                            dBuf[idx+3] = 255;
                         }}
                     }}
                 }}
+            }}
+            binaryMap = enhancedMap;
+        }}
 
-                ctxDest.putImageData(dstData, 0, 0);
+        // 3. 核心算法：Zhang-Suen Thinning (Skeletonization)
+        // 这是一个迭代算法，直到图像不再改变
+        let pixelsRemoved = true;
+        let iterCount = 0;
+        const maxIters = 100; // 防止死循环
+
+        while (pixelsRemoved && iterCount < maxIters) {{
+            pixelsRemoved = false;
+            iterCount++;
+            
+            // Step 1
+            let markers = [];
+            for (let y = 1; y < height - 1; y++) {{
+                for (let x = 1; x < width - 1; x++) {{
+                    let p2 = binaryMap[(y-1)*width + x];
+                    let p3 = binaryMap[(y-1)*width + x+1];
+                    let p4 = binaryMap[y*width + x+1];
+                    let p5 = binaryMap[(y+1)*width + x+1];
+                    let p6 = binaryMap[(y+1)*width + x];
+                    let p7 = binaryMap[(y+1)*width + x-1];
+                    let p8 = binaryMap[y*width + x-1];
+                    let p9 = binaryMap[(y-1)*width + x-1];
+
+                    let A  = (p2 == 0 && p3 == 1) + (p3 == 0 && p4 == 1) + 
+                             (p4 == 0 && p5 == 1) + (p5 == 0 && p6 == 1) + 
+                             (p6 == 0 && p7 == 1) + (p7 == 0 && p8 == 1) +
+                             (p8 == 0 && p9 == 1) + (p9 == 0 && p2 == 1);
+                    
+                    let B  = p2 + p3 + p4 + p5 + p6 + p7 + p8 + p9;
+                    
+                    let m1 = p2 * p4 * p6;
+                    let m2 = p4 * p6 * p8;
+
+                    if (binaryMap[y*width+x] === 1 && A === 1 && (B >= 2 && B <= 6) && m1 === 0 && m2 === 0) {{
+                        markers.push(y*width+x);
+                    }}
+                }}
+            }}
+            
+            if (markers.length > 0) pixelsRemoved = true;
+            for (let i = 0; i < markers.length; i++) binaryMap[markers[i]] = 0;
+
+            // Step 2
+            markers = [];
+            for (let y = 1; y < height - 1; y++) {{
+                for (let x = 1; x < width - 1; x++) {{
+                    let p2 = binaryMap[(y-1)*width + x];
+                    let p3 = binaryMap[(y-1)*width + x+1];
+                    let p4 = binaryMap[y*width + x+1];
+                    let p5 = binaryMap[(y+1)*width + x+1];
+                    let p6 = binaryMap[(y+1)*width + x];
+                    let p7 = binaryMap[(y+1)*width + x-1];
+                    let p8 = binaryMap[y*width + x-1];
+                    let p9 = binaryMap[(y-1)*width + x-1];
+
+                    let A  = (p2 == 0 && p3 == 1) + (p3 == 0 && p4 == 1) + 
+                             (p4 == 0 && p5 == 1) + (p5 == 0 && p6 == 1) + 
+                             (p6 == 0 && p7 == 1) + (p7 == 0 && p8 == 1) +
+                             (p8 == 0 && p9 == 1) + (p9 == 0 && p2 == 1);
+                    
+                    let B  = p2 + p3 + p4 + p5 + p6 + p7 + p8 + p9;
+                    
+                    let m1 = p2 * p4 * p8;
+                    let m2 = p2 * p6 * p8;
+
+                    if (binaryMap[y*width+x] === 1 && A === 1 && (B >= 2 && B <= 6) && m1 === 0 && m2 === 0) {{
+                        markers.push(y*width+x);
+                    }}
+                }}
             }}
 
-            // Event Listeners
-            sThreshold.oninput = () => {{ updateLabels(); process(); }};
-            sRidge.oninput = () => {{ updateLabels(); process(); }};
-            sGain.oninput = () => {{ updateLabels(); process(); }};
+            if (markers.length > 0) pixelsRemoved = true;
+            for (let i = 0; i < markers.length; i++) binaryMap[markers[i]] = 0;
+        }}
 
-            // Initial Run
-            updateLabels();
-            process();
-        }};
-    </script>
+        // 4. 将结果绘制回 Canvas
+        // 创建一个新的 ImageData 对象
+        let outputImg = ctxRes.createImageData(width, height);
+        let outData = outputImg.data;
+
+        for (let i = 0; i < width * height; i++) {{
+            let val = binaryMap[i] * 255; 
+            // 绿色显示骨架
+            outData[i*4 + 0] = 0;   // R
+            outData[i*4 + 1] = val; // G
+            outData[i*4 + 2] = 0;   // B
+            outData[i*4 + 3] = 255; // Alpha
+        }}
+        
+        ctxRes.putImageData(outputImg, 0, 0);
+        statusSpan.innerText = "Done (Iterations: " + iterCount + ")";
+    }}
+</script>
 </body>
 </html>
     """
-    
-    with open(output_filename, "w", encoding="utf-8") as f:
+
+    with open(output_html, "w", encoding="utf-8") as f:
         f.write(html_content)
-    print(f"Success! HTML generated: {output_filename}")
+    
+    print(f"Successfully generated: {output_html}")
+    print("Please open this file in your browser.")
 
 if __name__ == "__main__":
-    # 默认处理 sys.argv[1]，如果没有参数则提示
     if len(sys.argv) < 2:
-        print("Usage: python script.py <path_to_wav_file>")
-        # 为了演示方便，如果用户没传参数，可以尝试读取当前目录下的 demo.wav (可选)
-        sys.exit(1)
-    
-    input_wav = sys.argv[1]
-    output_html = os.path.splitext(input_wav)[0] + "_spectrum.html"
-    
-    # 1. 音频 -> 图片 Base64
-    img_data = process_audio_to_base64(input_wav)
-    
-    # 2. 生成带算法的 HTML
-    generate_html(img_data, output_html)
+        print("Usage: python wav2mel_thinning.py <input.wav>")
+    else:
+        process_audio_to_html(sys.argv[1])

@@ -4,174 +4,274 @@ import base64
 import io
 import numpy as np
 import librosa
-import librosa.display
-import matplotlib.pyplot as plt
+from PIL import Image
+import matplotlib.cm as cm
 
-# 设置 Matplotlib 后端为非交互式
-plt.switch_backend('Agg')
-
-def create_mel_html(audio_path):
+def process_audio_to_base64(audio_path):
+    """
+    读取 WAV，计算 Mel 频谱，归一化并转为 Base64 图片字符串。
+    """
     if not os.path.exists(audio_path):
         print(f"Error: File '{audio_path}' not found.")
-        return
+        sys.exit(1)
 
-    print(f"Processing {audio_path}...")
-
+    print(f"Processing audio: {audio_path}...")
+    
     # 1. 加载音频
-    try:
-        y, sr = librosa.load(audio_path)
-    except Exception as e:
-        print(f"Error loading audio: {e}")
-        return
-
-    # 2. 计算 Mel 频谱
+    y, sr = librosa.load(audio_path)
+    
+    # 2. 计算 Mel Spectrogram
+    # n_mels 决定了纵向的分辨率
     S = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=128, fmax=8000)
+    
+    # 3. 转为对数刻度 (dB)
     S_dB = librosa.power_to_db(S, ref=np.max)
-
-    # 3. 绘制图像 (无坐标轴)
-    plt.figure(figsize=(10, 4))
-    plt.axis('off')
-    plt.margins(0, 0)
-    plt.gca().xaxis.set_major_locator(plt.NullLocator())
-    plt.gca().yaxis.set_major_locator(plt.NullLocator())
-
-    librosa.display.specshow(S_dB, sr=sr, fmax=8000, cmap='magma')
     
-    buf = io.BytesIO()
-    plt.savefig(buf, format='png', bbox_inches='tight', pad_inches=0, transparent=True)
-    plt.close()
-    buf.seek(0)
+    # 4. 归一化到 0-255 并转为 uint8 (为了生成图片)
+    # 翻转 Y 轴，因为 librosa 默认低频在下，但在数组中是 index 0
+    S_dB = np.flipud(S_dB) 
     
-    # 4. 转为 Base64
-    img_base64 = base64.b64encode(buf.getvalue()).decode('utf-8')
-    img_src = f"data:image/png;base64,{img_base64}"
+    min_val = S_dB.min()
+    max_val = S_dB.max()
+    norm_S = 255 * (S_dB - min_val) / (max_val - min_val)
+    norm_S = norm_S.astype(np.uint8)
+    
+    # 5. 应用颜色映射 (Colormap) - 使用 'magma' 或 'inferno' 效果较好
+    # Matplotlib 的 colormap 返回 0-1 的 float，我们需要转回 0-255
+    cmap = cm.get_cmap('magma')
+    im_colored = cmap(norm_S / 255.0) 
+    im_uint8 = (im_colored * 255).astype(np.uint8)
+    
+    # 6. 转为 PIL Image 并保存到内存 Buffer
+    img = Image.fromarray(im_uint8)
+    
+    # 这里不需要坐标轴，直接是纯像素
+    buffered = io.BytesIO()
+    img.save(buffered, format="PNG")
+    img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
+    
+    return img_str
 
-    # 5. HTML 模板 (使用普通字符串，避免 f-string 与 JS 大括号冲突)
-    # 我们使用一个唯一的标记 {{IMG_DATA}} 来后续替换
-    html_template = """
+def generate_html(base64_img, output_filename):
+    html_content = f"""
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Mel Spectrogram Canny Edge Detection</title>
+    <title>Interactive Mel Spectrum Ridge Detection</title>
     <style>
-        body { font-family: sans-serif; background: #1e1e1e; color: #fff; padding: 20px; text-align: center; }
-        .container { display: flex; flex-wrap: wrap; justify-content: center; gap: 20px; margin-top: 20px; }
-        .canvas-wrapper { position: relative; border: 1px solid #444; }
-        canvas { display: block; max-width: 100%; height: auto; }
-        .label { position: absolute; top: 5px; left: 5px; background: rgba(0,0,0,0.7); padding: 2px 8px; font-size: 12px; border-radius: 4px; pointer-events: none;}
-        .controls { background: #333; padding: 20px; border-radius: 8px; display: inline-block; margin-bottom: 20px; }
-        .control-group { margin: 10px 0; display: flex; align-items: center; gap: 10px; }
-        input[type=range] { width: 200px; }
-        #status { color: #aaa; margin-bottom: 10px; font-style: italic; }
+        body {{
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #1e1e1e;
+            color: #e0e0e0;
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }}
+        h2 {{ margin-bottom: 10px; color: #fff; }}
+        .controls {{
+            background: #2d2d2d;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            display: flex;
+            gap: 20px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+        }}
+        .control-group {{
+            display: flex;
+            flex-direction: column;
+            align-items: flex-start;
+        }}
+        label {{ font-size: 0.9em; margin-bottom: 5px; color: #aaa; }}
+        input[type=range] {{ width: 200px; cursor: pointer; }}
+        
+        .container {{
+            display: flex;
+            gap: 20px;
+            flex-wrap: wrap;
+            justify-content: center;
+        }}
+        .panel {{
+            background: #000;
+            padding: 10px;
+            border-radius: 4px;
+            border: 1px solid #444;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }}
+        .panel h3 {{ margin: 0 0 10px 0; font-size: 1em; color: #888; }}
+        canvas {{
+            max-width: 100%;
+            height: auto;
+            image-rendering: pixelated; /* 保持像素清晰，适合频谱图 */
+        }}
     </style>
 </head>
 <body>
 
-    <h2>Mel Spectrogram Analysis</h2>
-    <div id="status">Loading OpenCV.js... (this may take a moment)</div>
+    <h2>Mel Spectrum Ridge Detector</h2>
 
     <div class="controls">
         <div class="control-group">
-            <label for="thresh1">Threshold 1:</label>
-            <input type="range" id="thresh1" min="0" max="500" value="100">
-            <span id="val1">100</span>
+            <label for="threshold">亮度阈值 (Noise Gate): <span id="val-thresh">30</span></label>
+            <input type="range" id="threshold" min="0" max="255" value="30">
         </div>
         <div class="control-group">
-            <label for="thresh2">Threshold 2:</label>
-            <input type="range" id="thresh2" min="0" max="500" value="200">
-            <span id="val2">200</span>
+            <label for="ridgeObj">脊线灵敏度 (Vertical Contrast): <span id="val-ridge">15</span></label>
+            <input type="range" id="ridgeObj" min="0" max="100" value="15">
+        </div>
+        <div class="control-group">
+            <label for="gain">显示增益 (Output Gain): <span id="val-gain">2.0</span></label>
+            <input type="range" id="gain" min="0.5" max="5.0" step="0.1" value="2.0">
         </div>
     </div>
 
     <div class="container">
-        <div class="canvas-wrapper">
-            <div class="label">Mel Spectrogram</div>
-            <img id="sourceImage" src="{{IMG_DATA}}" style="display:none;" onload="initCV()" />
-            <canvas id="canvasInput"></canvas>
+        <div class="panel">
+            <h3>Original Mel Spectrum</h3>
+            <canvas id="canvasSource"></canvas>
         </div>
-
-        <div class="canvas-wrapper">
-            <div class="label">Canny Edges</div>
-            <canvas id="canvasOutput"></canvas>
+        <div class="panel">
+            <h3>Extracted Horizontal Ridges</h3>
+            <canvas id="canvasDest"></canvas>
         </div>
     </div>
 
-    <script async src="https://docs.opencv.org/4.8.0/opencv.js" onload="onOpenCvReady();" type="text/javascript"></script>
+    <img id="sourceImg" src="data:image/png;base64,{base64_img}" style="display:none;" />
 
-    <script type="text/javascript">
-        let cvReady = false;
-        let imgLoaded = false;
+    <script>
+        window.onload = function() {{
+            const img = document.getElementById('sourceImg');
+            const cSrc = document.getElementById('canvasSource');
+            const ctxSrc = cSrc.getContext('2d');
+            const cDest = document.getElementById('canvasDest');
+            const ctxDest = cDest.getContext('2d');
 
-        function onOpenCvReady() {
-            cv['onRuntimeInitialized'] = () => {
-                document.getElementById('status').innerText = "OpenCV Ready. Processing...";
-                cvReady = true;
-                processImage();
-            };
-        }
+            // Controls
+            const sThreshold = document.getElementById('threshold');
+            const sRidge = document.getElementById('ridgeObj');
+            const sGain = document.getElementById('gain');
 
-        function initCV() {
-            imgLoaded = true;
-            processImage();
-        }
+            // Display value updaters
+            const updateLabels = () => {{
+                document.getElementById('val-thresh').innerText = sThreshold.value;
+                document.getElementById('val-ridge').innerText = sRidge.value;
+                document.getElementById('val-gain').innerText = sGain.value;
+            }};
 
-        function processImage() {
-            if (!cvReady || !imgLoaded) return;
+            // Main Processing Function
+            function process() {{
+                const w = img.width;
+                const h = img.height;
 
-            const imgElement = document.getElementById('sourceImage');
-            const canvasInput = document.getElementById('canvasInput');
-            const ctxInput = canvasInput.getContext('2d');
+                // Sync canvas sizes
+                if (cSrc.width !== w) {{ cSrc.width = w; cSrc.height = h; }}
+                if (cDest.width !== w) {{ cDest.width = w; cDest.height = h; }}
 
-            canvasInput.width = imgElement.width;
-            canvasInput.height = imgElement.height;
-            ctxInput.drawImage(imgElement, 0, 0);
+                // Draw source
+                ctxSrc.drawImage(img, 0, 0);
+                
+                // Get pixel data
+                const srcData = ctxSrc.getImageData(0, 0, w, h);
+                const dstData = ctxDest.createImageData(w, h);
+                
+                const sBuf = srcData.data;
+                const dBuf = dstData.data;
 
-            applyCanny();
-        }
+                const thresh = parseInt(sThreshold.value);
+                const ridgeSens = parseInt(sRidge.value);
+                const gain = parseFloat(sGain.value);
 
-        function applyCanny() {
-            if (!cvReady) return;
+                // CV Logic: Horizontal Ridge Detection
+                // 我们遍历每个像素，检查它在垂直方向上是否是局部最大值（脊）
+                // 并且亮度是否超过阈值
+                
+                for (let y = 1; y < h - 1; y++) {{
+                    for (let x = 0; x < w; x++) {{
+                        const idx = (y * w + x) * 4;
+                        
+                        // 获取当前像素及上下像素的亮度 (简单取 R 通道，因为是灰度或伪彩色)
+                        // 为了准确性，我们计算简单的平均亮度 (R+G+B)/3
+                        const val = (sBuf[idx] + sBuf[idx+1] + sBuf[idx+2]) / 3;
+                        
+                        // 上方像素
+                        const idxUp = ((y - 1) * w + x) * 4;
+                        const valUp = (sBuf[idxUp] + sBuf[idxUp+1] + sBuf[idxUp+2]) / 3;
+                        
+                        // 下方像素
+                        const idxDown = ((y + 1) * w + x) * 4;
+                        const valDown = (sBuf[idxDown] + sBuf[idxDown+1] + sBuf[idxDown+2]) / 3;
 
-            const t1 = parseInt(document.getElementById('thresh1').value);
-            const t2 = parseInt(document.getElementById('thresh2').value);
-            
-            document.getElementById('val1').innerText = t1;
-            document.getElementById('val2').innerText = t2;
+                        // 核心算法：
+                        // 1. 自身亮度必须大于阈值 (Noise Gate)
+                        // 2. 自身亮度必须显著高于上方像素 (Ridge Top)
+                        // 3. 自身亮度必须显著高于下方像素 (Ridge Bottom)
+                        // 这构成了一个垂直方向的"山峰"，即横向延伸的脊线
+                        
+                        let isRidge = false;
+                        if (val > thresh) {{
+                            if ((val > valUp + ridgeSens) && (val > valDown + ridgeSens)) {{
+                                isRidge = true;
+                            }}
+                        }}
 
-            let src = cv.imread('canvasInput');
-            let dst = new cv.Mat();
-            
-            cv.cvtColor(src, src, cv.COLOR_RGBA2GRAY, 0);
-            cv.Canny(src, dst, t1, t2, 3, false);
-            cv.imshow('canvasOutput', dst);
-            
-            src.delete();
-            dst.delete();
-        }
+                        if (isRidge) {{
+                            // 设为白色 (或者根据原始强度 * gain)
+                            let outVal = val * gain;
+                            if (outVal > 255) outVal = 255;
+                            
+                            dBuf[idx] = outVal;     // R
+                            dBuf[idx+1] = outVal;   // G
+                            dBuf[idx+2] = outVal;   // B
+                            dBuf[idx+3] = 255;      // Alpha
+                        }} else {{
+                            // 背景全黑
+                            dBuf[idx] = 0;
+                            dBuf[idx+1] = 0;
+                            dBuf[idx+2] = 0;
+                            dBuf[idx+3] = 255;
+                        }}
+                    }}
+                }}
 
-        document.getElementById('thresh1').addEventListener('input', applyCanny);
-        document.getElementById('thresh2').addEventListener('input', applyCanny);
+                ctxDest.putImageData(dstData, 0, 0);
+            }}
+
+            // Event Listeners
+            sThreshold.oninput = () => {{ updateLabels(); process(); }};
+            sRidge.oninput = () => {{ updateLabels(); process(); }};
+            sGain.oninput = () => {{ updateLabels(); process(); }};
+
+            // Initial Run
+            updateLabels();
+            process();
+        }};
     </script>
 </body>
 </html>
     """
-
-    # 6. 替换占位符并写入文件
-    final_html = html_template.replace("{{IMG_DATA}}", img_src)
-    
-    # 自动根据输入文件名生成输出文件名
-    base_name = os.path.splitext(os.path.basename(audio_path))[0]
-    output_filename = f"{base_name}_canny.html"
     
     with open(output_filename, "w", encoding="utf-8") as f:
-        f.write(final_html)
-
-    print(f"Success! Open '{output_filename}' in your browser.")
+        f.write(html_content)
+    print(f"Success! HTML generated: {output_filename}")
 
 if __name__ == "__main__":
+    # 默认处理 sys.argv[1]，如果没有参数则提示
     if len(sys.argv) < 2:
-        print("Usage: python main.py <path_to_wav_file>")
-    else:
-        create_mel_html(sys.argv[1])
+        print("Usage: python script.py <path_to_wav_file>")
+        # 为了演示方便，如果用户没传参数，可以尝试读取当前目录下的 demo.wav (可选)
+        sys.exit(1)
+    
+    input_wav = sys.argv[1]
+    output_html = os.path.splitext(input_wav)[0] + "_spectrum.html"
+    
+    # 1. 音频 -> 图片 Base64
+    img_data = process_audio_to_base64(input_wav)
+    
+    # 2. 生成带算法的 HTML
+    generate_html(img_data, output_html)
